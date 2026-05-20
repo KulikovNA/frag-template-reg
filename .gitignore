@@ -1,0 +1,43 @@
+# Python caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+
+# Packaging / editable installs
+*.egg-info/
+build/
+dist/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Local editor / agent state
+.vscode/
+.idea/
+.agents/
+.DS_Store
+
+# Training outputs and experiment artifacts
+work_dirs/
+runs/
+outputs/
+tensorboard/
+events.out.tfevents*
+*.log
+*.jsonl
+
+# Model weights / checkpoints
+*.pth
+*.pt
+*.ckpt
+*.onnx
+
+# Local scratch
+tmp/
+temp/

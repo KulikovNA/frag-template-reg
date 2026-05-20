@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "frag-template-reg"
+version = "0.1.0"
+description = "Visible fragment-shell to digital-twin canonical-coordinate registration."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy",
+    "opencv-python",
+    "tqdm",
+    "pyyaml",
+    "tensorboard",
+]
+
+[tool.setuptools.packages.find]
+include = ["fragreg*"]
