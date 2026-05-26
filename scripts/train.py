@@ -6,6 +6,8 @@ from __future__ import annotations
 import argparse
 import copy
 import sys
+import time
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -35,6 +37,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch-size", type=int, default=None, help="Runtime dataloader batch-size override.")
     parser.add_argument("--num-workers", type=int, default=None, help="Runtime dataloader worker override.")
     parser.add_argument("--num-points", type=int, default=None, help="Runtime dataset num_points override.")
+    parser.add_argument(
+        "--gradient-accumulation-steps",
+        type=int,
+        default=None,
+        help="Runtime override for train_cfg.gradient_accumulation_steps.",
+    )
     return parser.parse_args()
 
 
@@ -97,6 +105,56 @@ def resolve_checkpoint_dir(train_cfg: dict, work_dir: Path) -> Path:
     return resolve_output_path(value, default=work_dir, work_dir=work_dir)
 
 
+def should_use_date_subdir(train_cfg: dict) -> bool:
+    return bool(train_cfg.get("date_subdir", True))
+
+
+def make_date_subdir(train_cfg: dict) -> str:
+    date_format = str(train_cfg.get("date_subdir_format", "%d_%m_%Y"))
+    return datetime.now().strftime(date_format)
+
+
+def infer_work_dir_from_resume(resume_path: str | Path, train_cfg: dict) -> Path:
+    """Infer the run work_dir from a checkpoint path.
+
+    For checkpoints saved into a short relative checkpoint dir, e.g.
+    ``work_dir/checkpoints/latest.pth``, return ``work_dir``. Otherwise return
+    the checkpoint parent directory.
+    """
+
+    checkpoint_path = Path(resume_path).expanduser().resolve()
+    checkpoint_parent = checkpoint_path.parent
+    checkpoint_dir_value = train_cfg.get("checkpoint_dir", train_cfg.get("weights_dir"))
+    if checkpoint_dir_value is None:
+        return checkpoint_parent
+
+    configured_checkpoint_dir = Path(checkpoint_dir_value)
+    is_short_relative_name = (
+        not configured_checkpoint_dir.is_absolute()
+        and len(configured_checkpoint_dir.parts) == 1
+    )
+    if is_short_relative_name and checkpoint_parent.name == configured_checkpoint_dir.name:
+        return checkpoint_parent.parent
+    return checkpoint_parent
+
+
+def resolve_work_dir(
+    train_cfg: dict,
+    config_name: str,
+    resume_path: str | Path | None = None,
+) -> tuple[Path, Path, str | None]:
+    base_work_dir = Path(train_cfg.get("work_dir", f"work_dirs/{config_name}"))
+    if resume_path is not None and bool(train_cfg.get("resume_work_dir", True)):
+        work_dir = infer_work_dir_from_resume(resume_path, train_cfg)
+        if should_use_date_subdir(train_cfg) and work_dir.parent.resolve() == base_work_dir.resolve():
+            return base_work_dir, work_dir, work_dir.name
+        return base_work_dir, work_dir, None
+    if not should_use_date_subdir(train_cfg):
+        return base_work_dir, base_work_dir, None
+    run_date = make_date_subdir(train_cfg)
+    return base_work_dir, base_work_dir / run_date, run_date
+
+
 def dataset_scene_ids(loader_cfg: dict) -> Any:
     return copy.deepcopy(loader_cfg.get("dataset", {}).get("scene_ids"))
 
@@ -108,7 +166,7 @@ def main() -> None:
     units_cfg = get_units_cfg(cfg)
 
     train_cfg = cfg.train_cfg
-    work_dir = Path(train_cfg.get("work_dir", f"work_dirs/{cfg._config_name}"))
+    base_work_dir, work_dir, run_date = resolve_work_dir(train_cfg, cfg._config_name, resume_path=args.resume)
     checkpoint_dir = resolve_checkpoint_dir(train_cfg, work_dir)
     logger = setup_logger(work_dir)
     json_log = bool(train_cfg.get("json_log", True))
@@ -120,6 +178,8 @@ def main() -> None:
     device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else "cpu"))
     logger.info("Using device: %s", device)
     logger.info("Torch: %s, CUDA available: %s", torch.__version__, torch.cuda.is_available())
+    logger.info("Base work dir: %s", base_work_dir)
+    logger.info("Date subdir: %s", run_date or "<disabled>")
     logger.info("Work dir: %s", work_dir)
     logger.info("Checkpoint dir: %s", checkpoint_dir)
     logger.info(
@@ -181,6 +241,13 @@ def main() -> None:
     checkpoint_interval = int(train_cfg.get("checkpoint_interval", 1))
     save_latest = bool(train_cfg.get("save_latest", True))
     save_best = bool(train_cfg.get("save_best", True))
+    gradient_accumulation_steps = int(
+        args.gradient_accumulation_steps
+        or train_cfg.get("gradient_accumulation_steps", train_cfg.get("grad_accum_steps", 1))
+    )
+    if gradient_accumulation_steps < 1:
+        raise ValueError("gradient_accumulation_steps must be >= 1.")
+    logger.info("Gradient accumulation steps: %d", gradient_accumulation_steps)
     eval_cfg = cfg.get("eval_cfg", {})
     axis = eval_cfg.get("axis", cfg.loss.get("axis", "z"))
     solver_cfg = eval_cfg.get("solver", {})
@@ -196,14 +263,21 @@ def main() -> None:
                 device,
                 epoch,
                 max_batches=args.limit_train_batches,
+                gradient_accumulation_steps=gradient_accumulation_steps,
             )
-            payload = {"epoch": epoch, "split": "train", **{f"train/{k}": v for k, v in train_metrics.items()}}
+            payload = {
+                "epoch": epoch,
+                "split": "train",
+                "duration_sec": train_metrics.get("epoch_time_sec"),
+                **{f"train/{k}": v for k, v in train_metrics.items()},
+            }
             metrics_logger.log(payload)
             tb_logger.log_scalars(train_metrics, step=epoch, prefix="train")
             logger.info("Epoch %d train: %s", epoch, train_metrics)
 
             val_metrics = {}
             if val_loader is not None and val_interval > 0 and epoch % val_interval == 0:
+                val_start = time.perf_counter()
                 evaluator = Evaluator(
                     model,
                     val_loader,
@@ -218,6 +292,14 @@ def main() -> None:
                     return_per_sample=return_per_sample,
                 )
                 val_metrics = evaluator.evaluate(desc=f"val epoch {epoch}")
+                val_time_sec = time.perf_counter() - val_start
+                val_batches = (
+                    len(val_loader)
+                    if args.limit_val_batches is None
+                    else min(args.limit_val_batches, len(val_loader))
+                )
+                val_metrics["eval_time_sec"] = val_time_sec
+                val_metrics["seconds_per_batch"] = val_time_sec / max(val_batches, 1)
                 per_sample_metrics = val_metrics.pop("per_sample", None)
                 if per_sample_metrics is not None:
                     per_sample_path = work_dir / "per_sample_metrics_val.json"
@@ -226,7 +308,14 @@ def main() -> None:
                         item["split"] = "val"
                     write_json(per_sample_path, per_sample_metrics)
                     logger.info("Saved per-sample val metrics: %s", per_sample_path)
-                metrics_logger.log({"epoch": epoch, "split": "val", **{f"val/{k}": v for k, v in val_metrics.items()}})
+                metrics_logger.log(
+                    {
+                        "epoch": epoch,
+                        "split": "val",
+                        "duration_sec": val_time_sec,
+                        **{f"val/{k}": v for k, v in val_metrics.items()},
+                    }
+                )
                 tb_logger.log_scalars(val_metrics, step=epoch, prefix="val")
                 logger.info("Epoch %d val: %s", epoch, val_metrics)
 

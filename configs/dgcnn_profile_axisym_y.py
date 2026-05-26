@@ -84,6 +84,8 @@ loss = dict(
     axial_std_weight=0.0,
     axial_range_weight=0.0,
     axial_pairwise_weight=0.2,
+    axial_pairwise_mode="sampled",
+    axial_pairwise_num_pairs=8192,
     axis_loss_weight=0.2,
 )
 
@@ -97,7 +99,9 @@ train_cfg = dict(
     max_epochs=60,
     val_interval=60,
     work_dir="work_dirs/dgcnn_profile_axisym_y",
+    date_subdir=True,
     checkpoint_interval=60,
+    gradient_accumulation_steps=1,
     save_latest=True,
     save_best=True,
     metric_for_best="profile_residual_rmse_mm",

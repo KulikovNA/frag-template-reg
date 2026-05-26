@@ -62,7 +62,7 @@ def parse_args() -> argparse.Namespace:
         "checkpoint",
         nargs="?",
         default=None,
-        help="Path to checkpoint. Defaults to <train_cfg.work_dir>/best.pth.",
+        help="Path to checkpoint. Defaults to latest <train_cfg.work_dir>/<date>/best.pth when date_subdir is enabled.",
     )
     parser.add_argument("--split", default="val", choices=["train", "val", "test"])
     parser.add_argument("--scene-id", default=None, help="Optional scene_id override.")
@@ -95,14 +95,20 @@ def dataloader_cfg_for_split(cfg, split: str) -> dict:
 def resolve_checkpoint(cfg, checkpoint_arg: str | None) -> Path:
     if checkpoint_arg is not None:
         return Path(checkpoint_arg)
-    return Path(cfg.train_cfg.get("work_dir", f"work_dirs/{cfg._config_name}")) / "best.pth"
+    work_dir = Path(cfg.train_cfg.get("work_dir", f"work_dirs/{cfg._config_name}"))
+    candidates = [work_dir / "best.pth"]
+    if bool(cfg.train_cfg.get("date_subdir", True)) and work_dir.is_dir():
+        candidates.extend(work_dir.glob("*/best.pth"))
+    existing = [path for path in candidates if path.is_file()]
+    if existing:
+        return max(existing, key=lambda path: path.stat().st_mtime)
+    return candidates[0]
 
 
-def resolve_out_dir(cfg, out_dir_arg: str | None) -> Path:
+def resolve_out_dir(checkpoint: Path, out_dir_arg: str | None) -> Path:
     if out_dir_arg is not None:
         return ensure_dir(out_dir_arg)
-    work_dir = Path(cfg.train_cfg.get("work_dir", f"work_dirs/{cfg._config_name}"))
-    return ensure_dir(work_dir / "frame_object_placements")
+    return ensure_dir(checkpoint.resolve().parent / "frame_object_placements")
 
 
 def make_batch(sample: dict[str, Any], device: torch.device) -> dict[str, Any]:
@@ -364,7 +370,7 @@ def main() -> None:
     checkpoint = resolve_checkpoint(cfg, args.checkpoint)
     if not checkpoint.is_file():
         raise FileNotFoundError(f"Checkpoint not found: {checkpoint}")
-    out_dir = resolve_out_dir(cfg, args.out_dir)
+    out_dir = resolve_out_dir(checkpoint, args.out_dir)
     device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else "cpu"))
 
     loader_cfg = dataloader_cfg_for_split(cfg, args.split)

@@ -62,7 +62,7 @@ python scripts/train.py configs/dgcnn_profile_axisym_y.py
 Результаты обучения сохраняются в:
 
 ```text
-work_dirs/dgcnn_profile_axisym_y/
+work_dirs/dgcnn_profile_axisym_y/DD_MM_YYYY/
 ```
 
 Первая рабочая версия pipeline для регистрации видимой оболочки фрагмента к цифровому двойнику исходного объекта.
@@ -177,7 +177,7 @@ python scripts/train.py configs/dgcnn_profile_axisym_y.py
 python scripts/train.py configs/dgcnn_profile_global_axisym_y.py
 ```
 
-Артефакты сохраняются в `work_dirs/dgcnn_xyz_symmetry/`:
+Артефакты сохраняются в dated run-папку, например `work_dirs/dgcnn_xyz_symmetry/DD_MM_YYYY/`:
 
 ```text
 checkpoints/latest.pth
@@ -195,8 +195,10 @@ train_cfg = dict(
     max_epochs=100,
     val_interval=1,
     work_dir="work_dirs/dgcnn_xyz_symmetry",
+    date_subdir=True,
     checkpoint_dir="checkpoints",
     checkpoint_interval=5,
+    gradient_accumulation_steps=1,
     save_latest=True,
     save_best=True,
     metric_for_best="residual_rmse",
@@ -206,20 +208,31 @@ train_cfg = dict(
 )
 ```
 
-Если `checkpoint_dir` или `tensorboard_dir` заданы коротким относительным именем, например `"checkpoints"`, путь считается относительно `work_dir`. Абсолютный путь используется как есть.
+При `date_subdir=True` фактическая папка запуска создается как `work_dir/DD_MM_YYYY`, например `work_dirs/dgcnn_profile_global_axisym_y/26_05_2026`. Формат можно переопределить через `date_subdir_format`. Дата вычисляется один раз в начале запуска, поэтому если обучение идет несколько дней, папка не меняется. При resume из checkpoint train script по умолчанию продолжает писать в папку этого checkpoint; это можно отключить через `resume_work_dir=False`.
+
+Если `checkpoint_dir` или `tensorboard_dir` заданы коротким относительным именем, например `"checkpoints"`, путь считается относительно фактической run-папки. Абсолютный путь используется как есть.
+
+`metrics.jsonl` сохраняет `duration_sec`; для train также пишутся `train/epoch_time_sec`, `train/seconds_per_batch`, `train/optimizer_steps`, `train/gradient_accumulation_steps`, а для val — `val/eval_time_sec` и `val/seconds_per_batch`.
+
+Для уменьшения пика памяти можно уменьшить физический `batch_size` и сохранить effective batch через accumulation:
+
+```python
+train_dataloader = dict(batch_size=16, ...)
+train_cfg = dict(gradient_accumulation_steps=4, ...)
+```
 
 ## Evaluate
 
 ```bash
-python scripts/evaluate.py configs/dgcnn_xyz_symmetry.py work_dirs/dgcnn_xyz_symmetry/checkpoints/best.pth
-python scripts/evaluate.py configs/dgcnn_profile_axisym_y.py work_dirs/dgcnn_profile_axisym_y/best.pth
-python scripts/evaluate.py configs/dgcnn_profile_global_axisym_y.py work_dirs/dgcnn_profile_global_axisym_y/best.pth
+python scripts/evaluate.py configs/dgcnn_xyz_symmetry.py work_dirs/dgcnn_xyz_symmetry/DD_MM_YYYY/checkpoints/best.pth
+python scripts/evaluate.py configs/dgcnn_profile_axisym_y.py work_dirs/dgcnn_profile_axisym_y/DD_MM_YYYY/best.pth
+python scripts/evaluate.py configs/dgcnn_profile_global_axisym_y.py work_dirs/dgcnn_profile_global_axisym_y/DD_MM_YYYY/best.pth
 ```
 
 TensorBoard:
 
 ```bash
-tensorboard --logdir work_dirs/dgcnn_xyz_symmetry/tensorboard
+tensorboard --logdir work_dirs/dgcnn_xyz_symmetry/DD_MM_YYYY/tensorboard
 ```
 
 Основные метрики для осесимметричного объекта:
@@ -275,8 +288,12 @@ axial_mean_weight=0.1
 axial_std_weight=0.1
 axial_range_weight=0.0
 axial_pairwise_weight=0.0
+axial_pairwise_mode="sampled"
+axial_pairwise_num_pairs=8192
 axis_loss_weight=0.0
 ```
+
+`axial_pairwise_mode="sampled"` считает pairwise loss не по всем `N x N` парам, а по случайной подвыборке пар. Это полезно для больших `batch_size` и `num_points`, где полный pairwise loss быстро становится главным потребителем памяти.
 
 Optional axis head включается в модели через:
 
@@ -301,7 +318,7 @@ eval_cfg = dict(solver=dict(..., use_pred_axis_init=True))
 
 ```bash
 python scripts/train.py configs/dgcnn_profile_global_axisym_y.py
-python scripts/evaluate.py configs/dgcnn_profile_global_axisym_y.py work_dirs/dgcnn_profile_global_axisym_y/best.pth
+python scripts/evaluate.py configs/dgcnn_profile_global_axisym_y.py work_dirs/dgcnn_profile_global_axisym_y/DD_MM_YYYY/best.pth
 python scripts/debug_profile_global_batch.py configs/dgcnn_profile_global_axisym_y.py
 ```
 
@@ -309,20 +326,20 @@ python scripts/debug_profile_global_batch.py configs/dgcnn_profile_global_axisym
 
 ```bash
 python scripts/debug_profile_batch.py configs/dgcnn_profile_axisym_y.py
-python scripts/debug_profile_batch.py configs/dgcnn_profile_axisym_y.py --checkpoint work_dirs/dgcnn_profile_axisym_y/best.pth
+python scripts/debug_profile_batch.py configs/dgcnn_profile_axisym_y.py --checkpoint work_dirs/dgcnn_profile_axisym_y/DD_MM_YYYY/best.pth
 python scripts/debug_profile_global_batch.py configs/dgcnn_profile_global_axisym_y.py
 ```
 
 ## One-Scene Overfit Diagnostic
 
-`configs/dgcnn_profile_global_axisym_y_one_scene.py` нужен только для диагностики переобучения. Он обучает и валидирует `DGCNNProfileGlobal` на одной и той же сцене из `train` split (`scene_000003`). Это не честная оценка generalization performance.
+`configs/dgcnn_profile_global_axisym_y_one_scene.py` нужен только для диагностики переобучения. Он обучает и валидирует `DGCNNProfileGlobal` на одной и той же сцене из `train` split. Это не честная оценка generalization performance.
 
 ```bash
 python tools/check_dataset.py configs/dgcnn_profile_global_axisym_y_one_scene.py
 python scripts/train.py configs/dgcnn_profile_global_axisym_y_one_scene.py
-python scripts/evaluate.py configs/dgcnn_profile_global_axisym_y_one_scene.py work_dirs/dgcnn_profile_global_axisym_y_one_scene/best.pth
-python scripts/infer_profile_global.py configs/dgcnn_profile_global_axisym_y_one_scene.py work_dirs/dgcnn_profile_global_axisym_y_one_scene/best.pth
-python scripts/visualize_frame_object_placements.py configs/dgcnn_profile_global_axisym_y_one_scene.py work_dirs/dgcnn_profile_global_axisym_y_one_scene/best.pth
+python scripts/evaluate.py configs/dgcnn_profile_global_axisym_y_one_scene.py work_dirs/dgcnn_profile_global_axisym_y_one_scene/DD_MM_YYYY/best.pth
+python scripts/infer_profile_global.py configs/dgcnn_profile_global_axisym_y_one_scene.py work_dirs/dgcnn_profile_global_axisym_y_one_scene/DD_MM_YYYY/best.pth
+python scripts/visualize_frame_object_placements.py configs/dgcnn_profile_global_axisym_y_one_scene.py work_dirs/dgcnn_profile_global_axisym_y_one_scene/DD_MM_YYYY/best.pth
 ```
 
 Если на одной сцене `profile_axial_l1_mm`, `axial_corr`, `profile_residual_rmse_mm`, `axis_error_deg` и `translation_error_mm` становятся хорошими, а на обычном val/test остаются плохими, проблема скорее в обобщении и разнообразии данных. Если даже one-scene overfit не сходится, стоит искать проблему в архитектуре, loss, solver, нормализации или формировании sample.
@@ -335,7 +352,7 @@ per_sample_metrics_val.json
 
 В нем для каждого sample есть `scene_id`, `frame_id`, `fragment_id`, профильные метрики, `pred_axis_error_deg`, `axis_error_deg` и `translation_error_mm`.
 
-`infer_profile_global.py` сохраняет визуальную диагностику в `work_dirs/dgcnn_profile_global_axisym_y_one_scene/inference_vis/`:
+`infer_profile_global.py` сохраняет визуальную диагностику в `work_dirs/dgcnn_profile_global_axisym_y_one_scene/DD_MM_YYYY/inference_vis/`:
 
 - `profile_scatter.svg` — GT vs predicted profile в координатах `(axial, r)`;
 - `camera_observed_vs_pred_fit.ply` — видимые точки камеры и fitted points после solver-а;

@@ -56,6 +56,8 @@ class ProfileLoss(nn.Module):
         axial_std_weight: float = 0.0,
         axial_range_weight: float = 0.0,
         axial_pairwise_weight: float = 0.0,
+        axial_pairwise_mode: str = "full",
+        axial_pairwise_num_pairs: int = 8192,
         axis_loss_weight: float = 0.0,
     ) -> None:
         super().__init__()
@@ -68,7 +70,16 @@ class ProfileLoss(nn.Module):
         self.axial_std_weight = float(axial_std_weight)
         self.axial_range_weight = float(axial_range_weight)
         self.axial_pairwise_weight = float(axial_pairwise_weight)
+        self.axial_pairwise_mode = str(axial_pairwise_mode)
+        self.axial_pairwise_num_pairs = int(axial_pairwise_num_pairs)
         self.axis_loss_weight = float(axis_loss_weight)
+        if self.axial_pairwise_mode not in {"full", "sampled"}:
+            raise ValueError(
+                "axial_pairwise_mode must be either 'full' or 'sampled', "
+                f"got {self.axial_pairwise_mode!r}."
+            )
+        if self.axial_pairwise_mode == "sampled" and self.axial_pairwise_num_pairs <= 0:
+            raise ValueError("axial_pairwise_num_pairs must be positive when using sampled pairwise loss.")
 
     def forward(self, outputs: dict[str, torch.Tensor], batch: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
         pred = outputs["pred_profile_O"]
@@ -137,16 +148,32 @@ class ProfileLoss(nn.Module):
             )
 
         if self.axial_pairwise_weight != 0.0:
-            pred_pairwise = pred_axial.unsqueeze(2) - pred_axial.unsqueeze(1)
-            target_pairwise = target_axial.unsqueeze(2) - target_axial.unsqueeze(1)
-            pairwise_mask = valid_mask.unsqueeze(2) & valid_mask.unsqueeze(1)
-            pairwise_raw = F.smooth_l1_loss(
-                pred_pairwise,
-                target_pairwise,
-                beta=self.smooth_l1_beta,
-                reduction="none",
-            )
-            axial_pairwise = _masked_mean(pairwise_raw, pairwise_mask)
+            if self.axial_pairwise_mode == "sampled":
+                batch_size, num_points = pred_axial.shape
+                num_pairs = min(self.axial_pairwise_num_pairs, num_points * num_points)
+                pair_i = torch.randint(num_points, (batch_size, num_pairs), device=pred.device)
+                pair_j = torch.randint(num_points, (batch_size, num_pairs), device=pred.device)
+                pred_pairwise = pred_axial.gather(1, pair_i) - pred_axial.gather(1, pair_j)
+                target_pairwise = target_axial.gather(1, pair_i) - target_axial.gather(1, pair_j)
+                pairwise_mask = valid_mask.gather(1, pair_i) & valid_mask.gather(1, pair_j)
+                pairwise_raw = F.smooth_l1_loss(
+                    pred_pairwise,
+                    target_pairwise,
+                    beta=self.smooth_l1_beta,
+                    reduction="none",
+                )
+                axial_pairwise = _masked_mean(pairwise_raw, pairwise_mask)
+            else:
+                pred_pairwise = pred_axial.unsqueeze(2) - pred_axial.unsqueeze(1)
+                target_pairwise = target_axial.unsqueeze(2) - target_axial.unsqueeze(1)
+                pairwise_mask = valid_mask.unsqueeze(2) & valid_mask.unsqueeze(1)
+                pairwise_raw = F.smooth_l1_loss(
+                    pred_pairwise,
+                    target_pairwise,
+                    beta=self.smooth_l1_beta,
+                    reduction="none",
+                )
+                axial_pairwise = _masked_mean(pairwise_raw, pairwise_mask)
         else:
             axial_pairwise = pred.new_zeros(())
 
